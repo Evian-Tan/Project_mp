@@ -51,41 +51,41 @@ impl DeadlockDetector{
             }
         }
         let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
+        let mut path: Vec<usize> = Vec::new();
 
         fn dfs(
             node: usize,
             graph: &HashMap<usize, HashSet<usize>>,
             visited: &mut HashSet<usize>,
-            stack: &mut HashSet<usize>,
-        ) -> bool {
+            path: &mut Vec<usize>,
+        ) -> Option<Vec<usize>> {
             //loop detect
-            if stack.contains(&node) {
-                return true;
+            if let Some(pos) = path.iter().position(|&x| x == node) {
+                return Some(path[pos..].to_vec());
             }
             if visited.contains(&node) {
-                return false;
+                return None;
             }
 
-            visited.insert(node);
-            stack.insert(node);
+            path.push(node);
             //neighbors is the waited thread(those who take its wanted thread)
             if let Some(neighbors) = graph.get(&node) {
-                for neighbor in neighbors {
-                    if dfs(*neighbor, graph, visited, stack) {
-                        return true;
+                for &neighbor in neighbors {
+                    if let Some(cycle) = dfs(neighbor, graph, visited, path) {
+                        return Some(cycle);
                     }
                 }
             }
             //no cycle, clean visiting stack and return false
-            stack.remove(&node);
-            false
+            path.pop();
+            visited.insert(node);
+            None
         }    
 
         for &node in graph.keys() {
-            let mut local_stack = HashSet::new();
-            if dfs(node, &graph, &mut visited, &mut local_stack) {
-                return Some(local_stack.into_iter().collect());
+            let mut local_path = Vec::new();
+            if let Some(cycle) = dfs(node, &graph, &mut visited, &mut local_path) {
+                return Some(cycle);
             }
         }
         None
@@ -99,35 +99,40 @@ fn transfer(
     detector: &DeadlockDetector,
     tid: usize,
 ) {
-    let first_lock = from.balance.try_lock();
     let mut hold = HashSet::new();
     let mut wait = HashSet::new();
 
-    match first_lock{
-        Ok(_) => {
+    match from.balance.try_lock(){
+        Ok(mut from_guard) => {
             hold.insert(from.id);
             match to.balance.try_lock(){
-                Ok(_) => {
+                Ok(mut to_guard) => {
                     hold.insert(to.id);
-                    if from.balance >= amount{
-                        from.balance -= amount;
-                        to.balance += amount;
+                    if *from_guard >= amount{
+                        *from_guard -= amount;
+                        *to_guard += amount;
                         println!("Thread{}: Transaction confirmed! (From {} to {}, Amount ${})", tid,from.id,to.id,amount);
                     }
+                    else{
+                        println!("Error! Insufficient balance in Account{}", from.id);
+                    }
+                    detector.update_state(tid, HashSet::new(), HashSet::new()); //clean lock state
                 },
                 Err(_) => {
                     wait.insert(to.id);
+                    detector.update_state(tid, hold, wait);
                 }
             }    
         },
         Err(_) => {
             wait.insert(from.id);
+            detector.update_state(tid, HashSet::new(), wait);
         }
     }
-    detector.update_state(tid, hold, wait);
+    
 }
 fn main() {
-    let accounts: Vec<Arc<Account>> = (0..5)
+    let accounts: Vec<Arc<Account>> = (0..2)
         .map(|i| Arc::new(Account::new(i, 1000.0)))
         .collect();
 
@@ -143,11 +148,11 @@ fn main() {
                     let from_index = rng.random_range(0..accounts.len());
                     //no same accounts
                     let to_index = loop{
-                    let index = rng.random_range(0..accounts.len());
-                    if index != from_index {
-                    break index;
-                }
-            };
+                        let index = rng.random_range(0..accounts.len());
+                        if index != from_index {
+                            break index;
+                        }
+                    };
 
                     let from = &accounts[from_index];
                     let to = &accounts[to_index];
@@ -158,6 +163,7 @@ fn main() {
                     // detect
                     if let Some(cycle) = detector.detect_deadlock() {
                         println!("DEADLOCK DETECTED: Threads in cycle: {:?}", cycle);
+                        std::process::exit(1);
                     }
 
                     thread::sleep(Duration::from_millis(100));
