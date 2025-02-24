@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::collections::{HashMap,HashSet};
+use rand::Rng;
 
 struct Account{
     id: usize,
@@ -17,144 +18,155 @@ impl Account {
         }
     }
 }
-#[derive(Debug, Clone)]
-struct TransferRecord{
-    thread_id: usize,
-    from: usize,
-    to: usize,
-    start_time: Instant,
-}
-#[derive(Clone)]
+
 struct DeadlockDetector{
-    //record list of each thread transfer(Create list-->DFS-->loop detect)
-    active_transfers: Arc<Mutex<Vec<TransferRecord>>>,
+    lock_state: Mutex<HashMap<usize, (HashSet<usize>,HashSet<usize>)>>
 }
-
 impl DeadlockDetector{
-    fn new() -> Self{
-        DeadlockDetector {
-            active_transfers: Arc::new(Mutex::new(Vec::new())),
+    fn new() -> Self {
+        DeadlockDetector{
+            lock_state: Mutex::new(HashMap::new()),
         }
     }
+    fn update_state(&self, tid: usize, hold: HashSet<usize>, wait: HashSet<usize>){
+        let mut lock_state = self.lock_state.lock().unwrap();
+        lock_state.insert(tid, (hold, wait));
+    }  
 
-    fn start_transfer(&self, tid: usize, from: usize, to: usize){
-        let mut records = self.active_transfers.lock().unwrap();
-        records.push(TransferRecord{
-            thread_id: tid,
-            from,
-            to,
-            start_time: Instant::now(),
-        });
-    }
-    fn end_transfer(&self, tid: usize) {
-        let mut records = self.active_transfers.lock().unwrap();
-        records.retain(|r| r.thread_id != tid);
-    }
-
-    fn detect(&self) -> Option<Vec<usize>>{
-        //timeout detect abnormal thread activity
-        let timeout = Duration::from_secs(2);
-        let now = Instant::now();
-        //sort out those timeout records
-        let timed_out: Vec<_> = self.active_transfers.lock().unwrap()
-            .iter()
-            .filter(|r| now.duration_since(r.start_time) > timeout)
-            .cloned()
-            .collect();
-
-        if timed_out.is_empty(){return None;}
-
-        let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
-        for r in &timed_out {
-            graph.entry(r.from).or_default().insert(r.to);
+    fn detect_deadlock(&self) -> Option<Vec<usize>> {  
+        let mut lock_state = self.lock_state.lock().unwrap();
+        let mut graph = HashMap::new();
+        //find those who hold others' wanted -->deadlock (hold & wait)
+        for(&tid,(_,wait)) in lock_state.iter(){
+            let mut waiting_threads = HashSet::new();
+            for &resource in wait{
+                for (&other_tid, (other_hold,_)) in lock_state.iter(){
+                    if other_hold.contains(&resource) {
+                        waiting_threads.insert(other_tid);
+                    }
+                }
+            }       
+            if !waiting_threads.is_empty(){
+                graph.insert(tid,waiting_threads);
+            }
         }
-        let mut visited = HashMap::new();
+        let mut visited = HashSet::new();
+        let mut stack = HashSet::new();
+
+        fn dfs(
+            node: usize,
+            graph: &HashMap<usize, HashSet<usize>>,
+            visited: &mut HashSet<usize>,
+            stack: &mut HashSet<usize>,
+        ) -> bool {
+            //loop detect
+            if stack.contains(&node) {
+                return true;
+            }
+            if visited.contains(&node) {
+                return false;
+            }
+
+            visited.insert(node);
+            stack.insert(node);
+            //neighbors is the waited thread(those who take its wanted thread)
+            if let Some(neighbors) = graph.get(&node) {
+                for neighbor in neighbors {
+                    if dfs(*neighbor, graph, visited, stack) {
+                        return true;
+                    }
+                }
+            }
+            //no cycle, clean visiting stack and return false
+            stack.remove(&node);
+            false
+        }    
+
         for &node in graph.keys() {
-            if Self::dfs_detect_cycle(node, &graph, &mut visited) {
-                return Some(Self::extract_cycle(node, &graph));
+            let mut local_stack = HashSet::new();
+            if dfs(node, &graph, &mut visited, &mut local_stack) {
+                return Some(local_stack.into_iter().collect());
             }
         }
         None
     }
-    fn dfs_detect_cycle(
-        node: usize,
-        graph: &HashMap<usize, HashSet<usize>>,
-        visited: &mut HashMap<usize, bool>,
-    ) -> bool {
-        match visited.get(&node) {
-            Some(&true) => return true,    // loops detect
-            Some(&false) => return false,  // complete
-            None => {
-                visited.insert(node, true); // being visited
-                for &neighbor in graph.get(&node).unwrap_or(&HashSet::new()) {
-                    if Self::dfs_detect_cycle(neighbor, graph, visited) {
-                        return true;
+}
+
+fn transfer(
+    from: &Account,
+    to: &Account,
+    amount: f64,
+    detector: &DeadlockDetector,
+    tid: usize,
+) {
+    let first_lock = from.balance.try_lock();
+    let mut hold = HashSet::new();
+    let mut wait = HashSet::new();
+
+    match first_lock{
+        Ok(_) => {
+            hold.insert(from.id);
+            match to.balance.try_lock(){
+                Ok(_) => {
+                    hold.insert(to.id);
+                    if from.balance >= amount{
+                        from.balance -= amount;
+                        to.balance += amount;
+                        println!("Thread{}: Transaction confirmed! (From {} to {}, Amount ${})", tid,from.id,to.id,amount);
                     }
+                },
+                Err(_) => {
+                    wait.insert(to.id);
                 }
-                visited.insert(node, false); 
-                false
-            }
+            }    
+        },
+        Err(_) => {
+            wait.insert(from.id);
         }
     }
-    fn extract_cycle(start: usize, graph: &HashMap<usize, HashSet<usize>>) -> Vec<usize> {
-        let mut cycle = vec![start];
-        let mut current = start;
-        
-        while let Some(next) = graph.get(&current).and_then(|edges| edges.iter().next()) {
-            if *next == start {
-                cycle.push(*next);
-                break;
-            }
-            cycle.push(*next);
-            current = *next;
-        }
-        cycle
-    }
+    detector.update_state(tid, hold, wait);
 }
 fn main() {
-
     let accounts: Vec<Arc<Account>> = (0..5)
-        .map(|id| Arc::new(Account::new(id, 1000.0)))
+        .map(|i| Arc::new(Account::new(i, 1000.0)))
         .collect();
 
-    let detector = DeadlockDetector::new();
-    let mut handles = vec![];
-
-    for tid in 0..10 {
-        let accounts = accounts.clone();
-        let det = detector.clone();
-        
-        handles.push(thread::spawn(move || {
-            //10 threads deal with 5 accounts(++Deadlock)
-            let from_idx = tid % 5;
-            let to_idx = (tid + 1) % 5;
-            let from = &accounts[from_idx];
-            let to = &accounts[to_idx];
-
-            det.start_transfer(tid, from.id, to.id);
-            let (first, second) = if tid % 2 == 0 {
-                (from, to)
-            } else {
-                (to, from)
+    let detector = Arc::new(DeadlockDetector::new());
+    let handles: Vec<_> = (0..10)
+        .map(|i| {
+            let accounts = accounts.clone();
+            let detector = detector.clone();
+            thread::spawn(move || {
+                let tid = i;
+                loop {
+                    let mut rng = rand::rng();
+                    let from_index = rng.random_range(0..accounts.len());
+                    //no same accounts
+                    let to_index = loop{
+                    let index = rng.random_range(0..accounts.len());
+                    if index != from_index {
+                    break index;
+                }
             };
-            
-            let _lock1 = first.balance.lock().unwrap();
-            thread::sleep(Duration::from_millis(100));
-            let _lock2 = second.balance.lock().unwrap();
-            
-            thread::sleep(Duration::from_secs(3));
-            det.end_transfer(tid);
-        }));
-    }
-    loop {
-        thread::sleep(Duration::from_secs(1));
-        if let Some(cycle) = detector.detect() {
-            println!("Deadlock detected in cycle: {:?}", cycle);
-            break;
-        }
-    }
+
+                    let from = &accounts[from_index];
+                    let to = &accounts[to_index];
+
+                    // transfer
+                    transfer(from, to, 10.0, &detector, tid);
+
+                    // detect
+                    if let Some(cycle) = detector.detect_deadlock() {
+                        println!("DEADLOCK DETECTED: Threads in cycle: {:?}", cycle);
+                    }
+
+                    thread::sleep(Duration::from_millis(100));
+                }
+            })
+        })
+        .collect();
 
     for handle in handles {
         handle.join().unwrap();
     }
-}
+}    
