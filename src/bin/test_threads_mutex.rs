@@ -75,7 +75,7 @@ fn test_mp_transactions(){
     //Phase2: Again, we have defined its mutex before. Main process also have to acquire the lock to access internal data.
     let bank = bank.lock().unwrap();
     println!("Total accounts registered in bank: {}", bank.accounts.len());
-    for (account) in bank.accounts.iter() {
+    for account in bank.accounts.iter() {
         println!(
             "Account {}, login: {}, transaction: {}",
             account.id, account.login, account.transaction
