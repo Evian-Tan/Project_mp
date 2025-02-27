@@ -6,7 +6,7 @@ use std::{
     thread,
     time::Duration,
 };
-
+#[warn(unused_mut)]
 fn main() -> io::Result<()> {
     // pipe path
     let fifo_path = Path::new("/tmp/pipe");
@@ -44,7 +44,7 @@ fn main() -> io::Result<()> {
     let mut reader = BufReader::new(file);
 
     println!("FIFO for reading is open. Waiting for data...");
-
+    
     for line in reader.lines() {
         match line {
             Ok(l) => {
