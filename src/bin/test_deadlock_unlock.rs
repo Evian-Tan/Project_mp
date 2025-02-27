@@ -70,9 +70,9 @@ fn safe_transfer(
     }
 }
 fn main() {
-    thread::sleep(Duration::from_secs(10));
+    thread::sleep(Duration::from_secs(3));
     let accounts: Vec<Account> = (0..5)
-    .map(|id| Account::new(id, 1500.0))
+    .map(|id| Account::new(id, 5500.0))
     .collect();
 
     let mut handles = vec![];

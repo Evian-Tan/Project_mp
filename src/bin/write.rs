@@ -4,7 +4,6 @@ use std::{
     io::{self, BufWriter, Write, BufRead, Read},
     path::Path,
 };
-#[warn(unused_mut)]
 fn main() -> io::Result<()>{
     //pipe path
     let fifo_path = Path::new("/tmp/pipe");
